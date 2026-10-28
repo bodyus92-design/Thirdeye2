@@ -1,0 +1,323 @@
+name: Build APK
+on: [workflow_dispatch, push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v4
+        with: { gradle-version: 8.7 }
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/thirdeye/app app/src/main/res/values
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "ThirdEye"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          android.useAndroidX=true
+          EOF
+          cat > app/build.gradle.kts <<'EOF'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.thirdeye.app"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.thirdeye.app"
+                  minSdk = 29; targetSdk = 34
+                  versionCode = 1; versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+              implementation("androidx.camera:camera-core:1.3.4")
+              implementation("androidx.camera:camera-camera2:1.3.4")
+              implementation("androidx.camera:camera-lifecycle:1.3.4")
+              implementation("androidx.camera:camera-video:1.3.4")
+              implementation("androidx.lifecycle:lifecycle-service:2.8.4")
+          }
+          EOF
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.camera" android:required="false" />
+              <uses-permission android:name="android.permission.CAMERA" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.WAKE_LOCK" />
+              <application android:label="Third Eye" android:theme="@style/Theme.ThirdEye">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".RecorderService" android:exported="false"
+                      android:foregroundServiceType="camera|microphone" />
+              </application>
+          </manifest>
+          EOF
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.ThirdEye" parent="Theme.MaterialComponents.Light.NoActionBar">
+                  <item name="android:windowBackground">#ECE8E1</item>
+                  <item name="android:statusBarColor">#ECE8E1</item>
+                  <item name="android:navigationBarColor">#ECE8E1</item>
+                  <item name="android:windowLightStatusBar">true</item>
+              </style>
+          </resources>
+          EOF
+          cat > app/src/main/java/com/thirdeye/app/MainActivity.kt <<'EOF'
+          package com.thirdeye.app
+
+          import android.Manifest
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Bundle
+          import android.provider.MediaStore
+          import android.view.Gravity
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+          import android.widget.*
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.appcompat.widget.SwitchCompat
+          import androidx.core.content.ContextCompat
+
+          class MainActivity : AppCompatActivity() {
+              private val BG = Color.parseColor("#ECE8E1"); private val CARD = Color.parseColor("#F7F4EF")
+              private val INK = Color.parseColor("#3D4A47"); private val SUB = Color.parseColor("#7C8885")
+              private val SAGE = Color.parseColor("#8FA38B"); private val ROSE = Color.parseColor("#B88A93")
+              private lateinit var p: SharedPreferences
+              private lateinit var btn: TextView
+
+              private val perms = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
+                  if (granted()) start() else toast("Camera and microphone permission are needed")
+              }
+
+              override fun onCreate(s: Bundle?) {
+                  super.onCreate(s)
+                  p = getSharedPreferences("te", MODE_PRIVATE)
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(20), dp(28), dp(20), dp(28)) }
+                  root.addView(txt("Third Eye", 30f, INK, true))
+                  root.addView(txt("Quiet video recording, screen off.", 15f, SUB, false).also { it.setPadding(0, dp(2), 0, dp(18)) })
+
+                  btn = txt("", 18f, Color.WHITE, true).apply {
+                      gravity = Gravity.CENTER; setOnClickListener { toggle() }
+                  }
+                  root.addView(btn, LinearLayout.LayoutParams(MATCH_PARENT, dp(68)).apply { bottomMargin = dp(16) })
+
+                  seg(root, "Camera", listOf("Back", "Front"), "cam", 0)
+                  seg(root, "Quality", listOf("480p", "720p", "1080p"), "res", 1)
+                  seg(root, "Auto-split every", listOf("Off", "5 min", "10 min", "20 min"), "seg", 0)
+                  seg(root, "Start delay (time to pocket the phone)", listOf("None", "5 s", "10 s"), "delay", 0)
+                  card(root).apply {
+                      addView(SwitchCompat(this@MainActivity).apply {
+                          text = "Record sound"; setTextColor(INK); isChecked = p.getBoolean("mic", true)
+                          setOnCheckedChangeListener { _, c -> p.edit().putBoolean("mic", c).apply() }
+                      })
+                  }
+                  val open = txt("Open my recordings", 15f, INK, true).apply {
+                      gravity = Gravity.CENTER; background = bg(Color.TRANSPARENT, 16, SAGE)
+                      setOnClickListener { startActivity(Intent(Intent.ACTION_VIEW, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)) }
+                  }
+                  root.addView(open, LinearLayout.LayoutParams(MATCH_PARENT, dp(52)).apply { topMargin = dp(4) })
+                  root.addView(txt("Android always shows a notification and camera indicator while recording. " +
+                      "Only record where you have everyone's consent.", 12f, SUB, false).also { it.setPadding(dp(4), dp(16), dp(4), 0) })
+                  setContentView(ScrollView(this).apply { setBackgroundColor(BG); addView(root) })
+              }
+
+              override fun onResume() { super.onResume(); refresh() }
+
+              private fun refresh() {
+                  val on = RecorderService.running
+                  btn.text = if (on) "■  Stop recording" else "●  Start recording"
+                  btn.background = bg(if (on) ROSE else SAGE, 24)
+              }
+
+              private fun toggle() {
+                  if (RecorderService.running) {
+                      startService(Intent(this, RecorderService::class.java).setAction(RecorderService.STOP))
+                      btn.postDelayed({ refresh() }, 600)
+                  } else if (granted()) start()
+                  else perms.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS))
+              }
+
+              private fun start() {
+                  ContextCompat.startForegroundService(this, Intent(this, RecorderService::class.java))
+                  toast("Recording is starting. You can turn the screen off.")
+                  btn.postDelayed({ refresh() }, 600)
+              }
+
+              private fun granted() = listOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+                  .all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
+
+              // ---- tiny UI helpers ----
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_LONG).show()
+              private fun bg(c: Int, r: Int, stroke: Int? = null) = GradientDrawable().apply {
+                  setColor(c); cornerRadius = dp(r).toFloat(); if (stroke != null) setStroke(dp(1), stroke)
+              }
+              private fun txt(t: String, sp: Float, c: Int, bold: Boolean) = TextView(this).apply {
+                  text = t; textSize = sp; setTextColor(c); if (bold) setTypeface(typeface, android.graphics.Typeface.BOLD)
+              }
+              private fun card(parent: LinearLayout) = LinearLayout(this).apply {
+                  orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(14), dp(16), dp(10)); background = bg(CARD, 20)
+                  parent.addView(this, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(12) })
+              }
+              private fun seg(parent: LinearLayout, title: String, opts: List<String>, key: String, def: Int) {
+                  val c = card(parent)
+                  c.addView(txt(title, 13f, SUB, false))
+                  val g = RadioGroup(this).apply { orientation = RadioGroup.HORIZONTAL }
+                  opts.forEachIndexed { i, o ->
+                      g.addView(RadioButton(this).apply {
+                          id = i + 1; text = o; setTextColor(INK); textSize = 14f
+                          buttonTintList = ColorStateList.valueOf(SAGE)
+                      }, RadioGroup.LayoutParams(0, WRAP_CONTENT, 1f))
+                  }
+                  g.check(p.getInt(key, def) + 1)
+                  g.setOnCheckedChangeListener { _, id -> p.edit().putInt(key, id - 1).apply() }
+                  c.addView(g)
+              }
+          }
+          EOF
+          cat > app/src/main/java/com/thirdeye/app/RecorderService.kt <<'EOF'
+          package com.thirdeye.app
+
+          import android.annotation.SuppressLint
+          import android.app.*
+          import android.content.*
+          import android.content.pm.ServiceInfo
+          import android.os.*
+          import android.provider.MediaStore
+          import androidx.camera.core.CameraSelector
+          import androidx.camera.lifecycle.ProcessCameraProvider
+          import androidx.camera.video.*
+          import androidx.core.app.NotificationCompat
+          import androidx.core.content.ContextCompat
+          import androidx.lifecycle.LifecycleService
+          import java.text.SimpleDateFormat
+          import java.util.*
+
+          class RecorderService : LifecycleService() {
+              companion object { @Volatile var running = false; const val STOP = "STOP" }
+
+              private val h = Handler(Looper.getMainLooper())
+              private var vc: VideoCapture<Recorder>? = null
+              private var rec: Recording? = null
+              private var stopping = false
+              private var wake: PowerManager.WakeLock? = null
+              private var part = 0
+              private val t0 = System.currentTimeMillis()
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  super.onStartCommand(i, f, id)
+                  if (i?.action == STOP) { if (running) stopAll() else stopSelf(); return START_NOT_STICKY }
+                  if (running) return START_NOT_STICKY
+                  running = true; stopping = false
+                  getSystemService(NotificationManager::class.java)
+                      .createNotificationChannel(NotificationChannel("te", "Third Eye", NotificationManager.IMPORTANCE_LOW))
+                  startForeground(1, notif("Getting ready…"),
+                      ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                  wake = (getSystemService(POWER_SERVICE) as PowerManager)
+                      .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "thirdeye:rec").apply { acquire(6 * 60 * 60 * 1000L) }
+                  val p = getSharedPreferences("te", MODE_PRIVATE)
+                  h.postDelayed({ bind(p) }, intArrayOf(0, 5, 10)[p.getInt("delay", 0)] * 1000L)
+                  return START_NOT_STICKY
+              }
+
+              private fun notif(text: String): Notification = NotificationCompat.Builder(this, "te")
+                  .setSmallIcon(android.R.drawable.ic_menu_camera)
+                  .setContentTitle("Third Eye is recording").setContentText(text)
+                  .setOngoing(true).setUsesChronometer(true).setWhen(t0)
+                  .setContentIntent(PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE))
+                  .addAction(0, "Stop", PendingIntent.getService(this, 0,
+                      Intent(this, RecorderService::class.java).setAction(STOP), PendingIntent.FLAG_IMMUTABLE))
+                  .build()
+
+              private fun bind(p: SharedPreferences) {
+                  if (stopping) return
+                  val q = arrayOf(Quality.SD, Quality.HD, Quality.FHD)[p.getInt("res", 1)]
+                  val sel = if (p.getInt("cam", 0) == 0) CameraSelector.DEFAULT_BACK_CAMERA else CameraSelector.DEFAULT_FRONT_CAMERA
+                  val fut = ProcessCameraProvider.getInstance(this)
+                  fut.addListener({
+                      try {
+                          val r = Recorder.Builder()
+                              .setQualitySelector(QualitySelector.from(q, FallbackStrategy.lowerQualityOrHigherThan(q))).build()
+                          vc = VideoCapture.withOutput(r)
+                          fut.get().unbindAll()
+                          fut.get().bindToLifecycle(this, sel, vc!!)
+                          next(p)
+                      } catch (e: Exception) { finish() }
+                  }, ContextCompat.getMainExecutor(this))
+              }
+
+              @SuppressLint("MissingPermission")
+              private fun next(p: SharedPreferences) {
+                  if (stopping) return
+                  h.removeCallbacksAndMessages(null)
+                  val cv = ContentValues().apply {
+                      put(MediaStore.Video.Media.DISPLAY_NAME, "ThirdEye_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()))
+                      put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                      put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/ThirdEye")
+                  }
+                  val o = MediaStoreOutputOptions.Builder(contentResolver, MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+                      .setContentValues(cv).setFileSizeLimit(3_800_000_000L).build()   // stay under the 4GB cap
+                  var pr = vc!!.output.prepareRecording(this, o)
+                  if (p.getBoolean("mic", true)) pr = pr.withAudioEnabled()
+                  part++
+                  getSystemService(NotificationManager::class.java).notify(1, notif("Part $part · tap to open, or Stop"))
+                  rec = pr.start(ContextCompat.getMainExecutor(this)) { e ->
+                      if (e is VideoRecordEvent.Status) {
+                          if (Environment.getExternalStorageDirectory().usableSpace < 500_000_000L) stopAll() // low-storage guard
+                      } else if (e is VideoRecordEvent.Finalize) {
+                          rec = null
+                          val ok = e.error == VideoRecordEvent.Finalize.ERROR_NONE ||
+                                  e.error == VideoRecordEvent.Finalize.ERROR_FILE_SIZE_LIMIT_REACHED
+                          if (!stopping && ok) next(p) else finish()
+                      }
+                  }
+                  val m = intArrayOf(0, 5, 10, 20)[p.getInt("seg", 0)]
+                  if (m > 0) h.postDelayed({ rec?.stop() }, m * 60_000L)   // auto-split into parts
+              }
+
+              private fun stopAll() {
+                  if (stopping) return
+                  stopping = true; h.removeCallbacksAndMessages(null)
+                  val r = rec
+                  if (r != null) r.stop() else finish()
+              }
+
+              private fun finish() {
+                  running = false
+                  wake?.let { if (it.isHeld) it.release() }
+                  stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+              }
+
+              override fun onDestroy() { running = false; super.onDestroy() }
+          }
+          EOF
+      - run: gradle assembleDebug
+      - uses: actions/upload-artifact@v4
+        with: { name: ThirdEye-apk, path: app/build/outputs/apk/debug/app-debug.apk }
